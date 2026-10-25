@@ -1,3 +1,6 @@
+import { adminSupportRouter } from "../modules/support/admin-support.router.js";
+import { supportRouter } from "../modules/support/support.router.js";
+import { settlementsRouter, adminSettlementsRouter } from "../modules/settlements/settlements.router.js";
 import { referralsRouter, adminReferralsRouter } from "../modules/referrals/referrals.router.js";
 import { sponsorshipsRouter, adminSponsorshipsRouter } from "../modules/sponsorships/sponsorships.router.js";
 import { Router } from "express";
@@ -23,7 +26,10 @@ import { uploadsRouter } from "../modules/uploads/uploads.router.js";
 import { usersRouter } from "../modules/users/users.router.js";
 import { walletRouter } from "../modules/wallet/wallet.router.js";
 
+import { imagesRouter } from "../modules/images/images.router.js";
+
 const apiRouter = Router();
+apiRouter.use("/images", imagesRouter);
 
 apiRouter.use("/health", healthRouter);
 apiRouter.use("/referrals", referralsRouter);
@@ -41,9 +47,13 @@ apiRouter.use("/playback", playbackRouter);
 apiRouter.use("/playlists", playlistsRouter);
 apiRouter.use("/media", mediaRouter);
 apiRouter.use("/payments", paymentsRouter);
+apiRouter.use("/support", supportRouter);
+apiRouter.use("/admin/support", adminSupportRouter);
 apiRouter.use("/releases", releasesRouter);
 apiRouter.use("/royalties", royaltiesRouter);
 apiRouter.use("/agreements", agreementsRouter);
+apiRouter.use("/settlements", settlementsRouter);
+apiRouter.use("/admin/settlements", adminSettlementsRouter);
 apiRouter.use("/subscriptions", subscriptionsRouter);
 apiRouter.use("/tracks", tracksRouter);
 apiRouter.use("/uploads", uploadsRouter);

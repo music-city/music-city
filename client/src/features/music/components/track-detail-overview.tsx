@@ -1,7 +1,9 @@
+import { TrackSupport } from "@/features/support/support-controls";
 "use client";
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import Image from "next/image";
 import type { ArtistPublicProfile, TrackSummary } from "@music-city/shared";
 import { ArrowLeft, Bookmark, Heart, UserPlus } from "lucide-react";
 import { toast } from "sonner";
@@ -12,12 +14,10 @@ import { SaveToPlaylistButton } from "@/features/music/components/save-to-playli
 import { TrackCommerceActions } from "@/features/music/components/track-commerce-actions";
 import { tracksApi } from "@/features/music/lib/tracks-api";
 import { usersApi } from "@/features/users/lib/users-api";
-import { useGlobalPlayback } from "@/features/playback/providers/global-playback-provider";
 import { useAuth } from "@/hooks/use-auth";
 
 export const TrackDetailOverview = ({ trackId }: { trackId: string }) => {
   const { session } = useAuth();
-  const { setPlaybackQueue } = useGlobalPlayback();
   const [track, setTrack] = useState<TrackSummary | null>(null);
   const [artistProfile, setArtistProfile] = useState<ArtistPublicProfile | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -60,10 +60,6 @@ export const TrackDetailOverview = ({ trackId }: { trackId: string }) => {
       cancelled = true;
     };
   }, [trackId]);
-
-  useEffect(() => {
-    setPlaybackQueue(track ? [track] : []);
-  }, [track, setPlaybackQueue]);
 
   useEffect(() => {
     let cancelled = false;
@@ -207,10 +203,7 @@ export const TrackDetailOverview = ({ trackId }: { trackId: string }) => {
       <div className="grid gap-8 lg:grid-cols-[320px_minmax(0,1fr)]">
         <div className="overflow-hidden rounded-[32px] border border-white/10 bg-white/[0.04]">
           {track.coverImageUrl ? (
-            <div
-              className="aspect-square bg-cover bg-center"
-              style={{ backgroundImage: `url(${track.coverImageUrl})` }}
-            />
+            <Image src={track.coverImageUrl} alt="" width={768} height={768} sizes="(min-width: 1024px) 320px, 92vw" maxWidth={1200} className="aspect-square h-auto w-full object-cover" />
           ) : (
             <div className="aspect-square bg-[radial-gradient(circle_at_top,_rgba(52,211,153,0.28),_transparent_52%),linear-gradient(180deg,_rgba(15,23,42,0.15),_rgba(15,23,42,0.94))]" />
           )}
@@ -259,6 +252,12 @@ export const TrackDetailOverview = ({ trackId }: { trackId: string }) => {
             </div>
             <div>
               <p className="text-sm uppercase tracking-[0.22em] text-slate-500">
+                Streams
+              </p>
+              <p className="mt-2 text-base text-white">{track.plays.toLocaleString()}</p>
+            </div>
+            <div>
+              <p className="text-sm uppercase tracking-[0.22em] text-slate-500">
                 Likes
               </p>
               <p className="mt-2 text-base text-white">{track.likes}</p>
@@ -273,6 +272,7 @@ export const TrackDetailOverview = ({ trackId }: { trackId: string }) => {
             </div>
           </div>
 
+          <TrackSupport trackId={track.id} />
           {track.description ? (
             <div className="space-y-2">
               <p className="text-sm uppercase tracking-[0.22em] text-slate-500">

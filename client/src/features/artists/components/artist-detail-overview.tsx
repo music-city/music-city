@@ -1,3 +1,4 @@
+import { ArtistSupport } from "@/features/support/support-controls";
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
@@ -100,12 +101,17 @@ export const ArtistDetailOverview = ({ artistId }: { artistId: string }) => {
   }, [profile?.id, session?.token]);
 
   const groupedReleases = useMemo(
-    () => ({
-      scheduled: releases.filter((release) => release.status === "scheduled"),
-      albums: releases.filter((release) => release.type === "album"),
-      eps: releases.filter((release) => release.type === "ep"),
-      singles: releases.filter((release) => release.type === "single"),
-    }),
+    () => [
+      { title: "Upcoming releases", items: releases.filter((release) => release.status === "scheduled") },
+      ...([
+        ["album", "Albums"],
+        ["ep", "EPs"],
+        ["single", "Singles"],
+      ] as const).map(([type, title]) => ({
+        title,
+        items: releases.filter((release) => release.status === "published" && release.type === type),
+      })),
+    ].filter((group) => group.items.length > 0),
     [releases],
   );
 
@@ -175,6 +181,8 @@ export const ArtistDetailOverview = ({ artistId }: { artistId: string }) => {
               {profile.followerCount === 1 ? "" : "s"}
             </p>
           </div>
+          <div className="flex flex-wrap gap-3">
+          <ArtistSupport artistId={profile.id} />
           {session ? (
             <Button
               variant={isFollowing ? "default" : "outline"}
@@ -190,50 +198,20 @@ export const ArtistDetailOverview = ({ artistId }: { artistId: string }) => {
               {isFollowing ? "Following" : "Follow artist"}
             </Button>
           ) : null}
+          </div>
         </div>
       </section>
 
-      {groupedReleases.scheduled.length > 0 ? (
-        <section className="space-y-5">
-          <h3 className="text-2xl font-semibold text-white">Upcoming releases</h3>
-          <ReleaseGrid
-            releases={groupedReleases.scheduled}
-            emptyMessage="No upcoming releases from this artist yet."
-          />
+      {groupedReleases.map((group) => (
+        <section key={group.title} className="space-y-5">
+          <h3 className="text-2xl font-semibold text-white">{group.title}</h3>
+          <ReleaseGrid releases={group.items} />
         </section>
+      ))}
+
+      {groupedReleases.length === 0 ? (
+        <p className="text-sm text-slate-400">No releases yet.</p>
       ) : null}
-
-      <section className="space-y-5">
-        <h3 className="text-2xl font-semibold text-white">Latest releases</h3>
-        <ReleaseGrid
-          releases={releases.filter((release) => release.status === "published").slice(0, 3)}
-          emptyMessage="No live releases from this artist yet."
-        />
-      </section>
-
-      <section className="space-y-5">
-        <h3 className="text-2xl font-semibold text-white">Albums</h3>
-        <ReleaseGrid
-          releases={groupedReleases.albums.filter((release) => release.status === "published")}
-          emptyMessage="No live albums yet."
-        />
-      </section>
-
-      <section className="space-y-5">
-        <h3 className="text-2xl font-semibold text-white">EPs</h3>
-        <ReleaseGrid
-          releases={groupedReleases.eps.filter((release) => release.status === "published")}
-          emptyMessage="No live EPs yet."
-        />
-      </section>
-
-      <section className="space-y-5">
-        <h3 className="text-2xl font-semibold text-white">Singles</h3>
-        <ReleaseGrid
-          releases={groupedReleases.singles.filter((release) => release.status === "published")}
-          emptyMessage="No live singles yet."
-        />
-      </section>
 
       <section className="space-y-5">
         <h3 className="text-2xl font-semibold text-white">Top tracks</h3>

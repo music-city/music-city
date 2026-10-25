@@ -20,12 +20,14 @@ import {
   Play,
   SkipBack,
   SkipForward,
-  Volume2,
-  VolumeX,
   X,
 } from "lucide-react";
 import { toast } from "sonner";
 import Link from "next/link";
+import Image from "next/image";
+
+import { usePlaybackVolume } from "@/features/playback/hooks/use-playback-volume";
+import { VolumeControl } from "@/features/playback/components/volume-control";
 
 import { adsApi } from "@/features/ads/lib/ads-api";
 import { engagementApi } from "@/features/engagement/lib/engagement-api";
@@ -58,6 +60,7 @@ type GlobalPlaybackContextValue = {
   seekTo: (value: number) => void;
   skipBy: (delta: number) => void;
   setVolumeLevel: (value: number) => void;
+  toggleMute: () => void;
   setPlaybackQueue: (tracks: TrackSummary[]) => void;
 };
 
@@ -93,10 +96,7 @@ const describePlaybackError = (error: unknown) =>
 const TrackArt = ({ track }: { track: TrackSummary }) => {
   if (track.coverImageUrl) {
     return (
-      <div
-        className="absolute inset-0 bg-cover bg-center"
-        style={{ backgroundImage: `url(${track.coverImageUrl})` }}
-      />
+      <Image src={track.coverImageUrl} alt="" fill priority sizes="(min-width: 640px) 80px, 78vw" maxWidth={768} className="object-cover" />
     );
   }
 
@@ -131,6 +131,7 @@ const GlobalPlaybackBar = ({
   dismissPlayback,
   seekTo,
   setVolumeLevel,
+  toggleMute,
 }: Omit<
   GlobalPlaybackContextValue,
   "activeTrackId" | "playTrack" | "skipBy" | "setPlaybackQueue"
@@ -290,6 +291,9 @@ const GlobalPlaybackBar = ({
                   Sponsored{activeAd?.brandName ? ` · ${activeAd.brandName}` : ""}
                 </p>
               ) : null}
+              <div className="mx-auto w-full max-w-xs">
+                <VolumeControl volume={volume} onChange={setVolumeLevel} onToggleMute={toggleMute} />
+              </div>
             </div>
           </div>
         </section>
@@ -428,24 +432,7 @@ const GlobalPlaybackBar = ({
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
-            {volume === 0 ? (
-              <VolumeX className="h-4 w-4 shrink-0 text-slate-400" />
-            ) : (
-              <Volume2 className="h-4 w-4 shrink-0 text-slate-400" />
-            )}
-            <input
-              type="range"
-              min={0}
-              max={1}
-              step={0.01}
-              value={volume}
-              onChange={(event) => setVolumeLevel(Number(event.target.value))}
-              aria-label="Volume"
-              className="h-1.5 w-full cursor-pointer appearance-none rounded-full"
-              style={{ background: buildRangeBackground(volume, 1, "#34d399") }}
-            />
-          </div>
+          <VolumeControl volume={volume} onChange={setVolumeLevel} onToggleMute={toggleMute} />
         </div>
       </div>
     </>
@@ -453,19 +440,26 @@ const GlobalPlaybackBar = ({
 };
 
 export const GlobalPlaybackProvider = ({ children }: { children: ReactNode }) => {
-  const { session, logout } = useAuth();
+  const { session, logout, connectWallet } = useAuth();
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const playbackActorRef = useRef(session?.walletAddress ?? "guest");
+  playbackActorRef.current = session?.walletAddress ?? "guest";
   const hlsRef = useRef<Hls | null>(null);
   const animationFrameRef = useRef<number | null>(null);
   const [activeTrack, setActiveTrack] = useState<TrackSummary | null>(null);
   const [playbackSession, setPlaybackSession] = useState<PlaybackSession | null>(
     null,
   );
+  const playbackSessionRef = useRef<PlaybackSession | null>(null);
+  const activeTrackRef = useRef<TrackSummary | null>(null);
+  playbackSessionRef.current = playbackSession;
+  activeTrackRef.current = activeTrack;
   const [streamUrl, setStreamUrl] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [guestLimitReached, setGuestLimitReached] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [volume, setVolume] = useState(0.85);
+  const { volume, setVolumeLevel, toggleMute } = usePlaybackVolume(audioRef);
   const [playbackQueue, setPlaybackQueueState] = useState<TrackSummary[]>([]);
   const [activeAd, setActiveAd] = useState<AdRecord | null>(null);
   const [activeAdImpressionId, setActiveAdImpressionId] = useState<string | null>(
@@ -478,6 +472,9 @@ export const GlobalPlaybackProvider = ({ children }: { children: ReactNode }) =>
   const unreportedListenSecondsRef = useRef(0);
   const isReportingPlaybackRef = useRef(false);
   const completionReportedRef = useRef(false);
+  const guestPromptOpenedRef = useRef(false);
+  const resumePositionRef = useRef<number | null>(null);
+  const advanceQueueRef = useRef<() => Promise<void>>(async () => {});
 
   const setPlaybackQueue = useCallback((tracks: TrackSummary[]) => {
     const nextQueue = tracks.filter((track) => track.playbackReady);
@@ -513,11 +510,31 @@ export const GlobalPlaybackProvider = ({ children }: { children: ReactNode }) =>
       unreportedListenSecondsRef.current += nextPosition - previousPosition;
     }
 
+    const currentTrack = activeTrackRef.current;
+    const currentPlaybackSession = playbackSessionRef.current;
+    const declaredRuntime = currentTrack?.runtime.match(/^(\d+):(\d{2})$/);
+    const fullDuration = declaredRuntime
+      ? Number(declaredRuntime[1]) * 60 + Number(declaredRuntime[2])
+      : audio.duration;
+    const guestLimit = currentPlaybackSession?.isGuest && fullDuration > 0 && (currentPlaybackSession.guestBudgetRemainingSeconds ?? Infinity) <= fullDuration
+      ? Math.min(fullDuration, currentPlaybackSession.guestRemainingSeconds ?? fullDuration)
+      : Number.POSITIVE_INFINITY;
+    if (currentPlaybackSession?.isGuest && nextPosition >= guestLimit && !guestPromptOpenedRef.current) {
+      guestPromptOpenedRef.current = true;
+      audio.currentTime = guestLimit;
+      audio.pause();
+      setCurrentTime(guestLimit);
+      setIsPlaying(false);
+      setGuestLimitReached(true);
+      lastObservedPlaybackPositionRef.current = guestLimit;
+      return;
+    }
+
     lastObservedPlaybackPositionRef.current = nextPosition;
     setCurrentTime(nextPosition);
 
     if (Number.isFinite(audio.duration) && audio.duration > 0) {
-      setDuration(audio.duration);
+      setDuration(fullDuration);
       return;
     }
 
@@ -587,16 +604,17 @@ export const GlobalPlaybackProvider = ({ children }: { children: ReactNode }) =>
   );
 
   const startTrackSession = useCallback(
-    async (track: TrackSummary) => {
-      if (!session?.token) {
-        return;
-      }
-
+    async (track: TrackSummary, resumeAt = 0) => {
       try {
+        const actor = playbackActorRef.current;
         const nextPlaybackSession = await playbackApi.createSession(
-          session.token,
+          session?.token,
           track.id,
         );
+        if (playbackActorRef.current !== actor) return;
+        setGuestLimitReached(false);
+        guestPromptOpenedRef.current = false;
+        resumePositionRef.current = resumeAt > 0 ? resumeAt : null;
         lastObservedPlaybackPositionRef.current = null;
         unreportedListenSecondsRef.current = 0;
         isReportingPlaybackRef.current = false;
@@ -606,6 +624,13 @@ export const GlobalPlaybackProvider = ({ children }: { children: ReactNode }) =>
         setPlaybackSession(nextPlaybackSession);
         setStreamUrl(nextPlaybackSession.streamUrl);
       } catch (error) {
+        if (error instanceof ApiClientError && error.status === 429 && error.message.includes("Guest listening limit")) {
+          audioRef.current?.pause();
+          setIsPlaying(false);
+          setGuestLimitReached(true);
+          guestPromptOpenedRef.current = true;
+          return;
+        }
         if (error instanceof ApiClientError && error.status === 401) {
           toast.error("Your session expired. Please sign in again.");
           await logout();
@@ -623,7 +648,12 @@ export const GlobalPlaybackProvider = ({ children }: { children: ReactNode }) =>
   const handleAudioEnded = useCallback(async () => {
     stopAnimationLoop();
     setIsPlaying(false);
-    setCurrentTime(0);
+    if (playbackSession?.isGuest && (playbackSession.guestBudgetRemainingSeconds ?? Infinity) <= (playbackSession.guestTrackDurationSeconds ?? 0) && !session?.token) {
+      setGuestLimitReached(true);
+      guestPromptOpenedRef.current = true;
+      return;
+    }
+    setCurrentTime(audioRef.current?.currentTime ?? 0);
 
     if (activeAd && pendingTrackAfterAd) {
       const impressionId = activeAdImpressionId;
@@ -637,13 +667,17 @@ export const GlobalPlaybackProvider = ({ children }: { children: ReactNode }) =>
       }
 
       await startTrackSession(nextTrack);
+      return;
     }
+    await advanceQueueRef.current();
   }, [
     activeAd,
     activeAdImpressionId,
     clearActiveAdState,
     pendingTrackAfterAd,
     reportAdImpressionUpdate,
+    playbackSession,
+    session?.token,
     startTrackSession,
   ]);
 
@@ -655,7 +689,13 @@ export const GlobalPlaybackProvider = ({ children }: { children: ReactNode }) =>
     }
 
     const handleTimeUpdate = () => syncProgress();
-    const handleLoadedMetadata = () => syncProgress();
+    const handleLoadedMetadata = () => {
+      if (resumePositionRef.current !== null) {
+        audio.currentTime = Math.min(resumePositionRef.current, audio.duration || resumePositionRef.current);
+        resumePositionRef.current = null;
+      }
+      syncProgress();
+    };
     const handleDurationChange = () => syncProgress();
     const handleCanPlay = () => {
       syncProgress();
@@ -673,7 +713,6 @@ export const GlobalPlaybackProvider = ({ children }: { children: ReactNode }) =>
       void handleAudioEnded();
     };
 
-    audio.volume = volume;
     audio.addEventListener("timeupdate", handleTimeUpdate);
     audio.addEventListener("loadedmetadata", handleLoadedMetadata);
     audio.addEventListener("durationchange", handleDurationChange);
@@ -692,7 +731,7 @@ export const GlobalPlaybackProvider = ({ children }: { children: ReactNode }) =>
       audio.removeEventListener("ended", handleEnded);
       stopAnimationLoop();
     };
-  }, [handleAudioEnded, volume]);
+  }, [handleAudioEnded]);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -797,7 +836,6 @@ export const GlobalPlaybackProvider = ({ children }: { children: ReactNode }) =>
       force = false,
     ) => {
       if (
-        !session?.token ||
         !playbackSession ||
         isReportingPlaybackRef.current
       ) {
@@ -818,7 +856,7 @@ export const GlobalPlaybackProvider = ({ children }: { children: ReactNode }) =>
 
       try {
         const updatedSession = await engagementApi.recordPlaybackEvent(
-          session.token,
+          session?.token,
           playbackSession,
           {
             eventType,
@@ -841,6 +879,18 @@ export const GlobalPlaybackProvider = ({ children }: { children: ReactNode }) =>
     },
     [duration, playbackSession, session?.token],
   );
+
+  const upgradedGuestSessionRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!session?.token || !playbackSession?.isGuest || !activeTrack) return;
+    if (upgradedGuestSessionRef.current === playbackSession.id) return;
+    upgradedGuestSessionRef.current = playbackSession.id;
+    const position = audioRef.current?.currentTime ?? currentTime;
+    void (async () => {
+      await recordPlaybackEvent("progress", position, true);
+      await startTrackSession(activeTrack, position);
+    })();
+  }, [activeTrack, currentTime, playbackSession, recordPlaybackEvent, session?.token, startTrackSession]);
 
   useEffect(() => {
     if (!playbackSession || !isPlaying || unreportedListenSecondsRef.current < 15) {
@@ -888,6 +938,7 @@ export const GlobalPlaybackProvider = ({ children }: { children: ReactNode }) =>
   }, [currentTime, recordPlaybackEvent]);
 
   const playTrack = useCallback(async (track: TrackSummary) => {
+    const actor = playbackActorRef.current;
     if (track.id === activeTrack?.id && audioRef.current) {
       try {
         if (audioRef.current.paused) {
@@ -908,6 +959,9 @@ export const GlobalPlaybackProvider = ({ children }: { children: ReactNode }) =>
     }
 
     if (!session?.token) {
+      if (playbackSession) await recordPlaybackEvent("progress", currentTime, true);
+      trackEvent("track_played");
+      await startTrackSession(track);
       return;
     }
 
@@ -925,6 +979,7 @@ export const GlobalPlaybackProvider = ({ children }: { children: ReactNode }) =>
 
     try {
       const decision = await adsApi.getPlaybackDecision(session.token, track.id);
+      if (playbackActorRef.current !== actor) return;
 
       if (!decision.serveAd || !decision.ad || !decision.impressionId) {
         trackEvent("track_played");
@@ -969,6 +1024,55 @@ export const GlobalPlaybackProvider = ({ children }: { children: ReactNode }) =>
     session?.token,
     startTrackSession,
   ]);
+
+  advanceQueueRef.current = async () => {
+    const index = playbackQueue.findIndex((track) => track.id === activeTrackRef.current?.id);
+    const next = index >= 0 ? playbackQueue[index + 1] : undefined;
+    if (!next) return;
+    await recordPlaybackEvent("completed", audioRef.current?.currentTime ?? currentTime, true);
+    await playTrack(next);
+  };
+
+  useEffect(() => {
+    playbackApi.preloadTracks(session?.token, playbackQueue);
+  }, [playbackQueue, session?.token]);
+
+  useEffect(() => {
+    if (typeof IntersectionObserver === "undefined") return;
+    const observed = new WeakSet<Element>();
+    const observer = new IntersectionObserver((entries) => {
+      const ids = entries.filter(entry => entry.isIntersecting)
+        .map(entry => (entry.target as HTMLElement).dataset.playbackPreload)
+        .filter((id): id is string => Boolean(id));
+      if (ids.length) playbackApi.preloadTrackIds(session?.token, ids);
+    }, { rootMargin: "200px" });
+    const scan = () => {
+      document.querySelectorAll("[data-playback-preload]").forEach(element => {
+        if (!observed.has(element)) { observed.add(element); observer.observe(element); }
+      });
+    };
+    scan();
+    const mutations = new MutationObserver(scan);
+    mutations.observe(document.body, {childList:true,subtree:true,attributes:true,attributeFilter:["data-playback-preload"]});
+    return () => {observer.disconnect();mutations.disconnect();};
+  }, [session?.token]);
+
+  const previousPlaybackWallet = useRef(session?.walletAddress);
+  useEffect(() => {
+    if (previousPlaybackWallet.current && previousPlaybackWallet.current !== session?.walletAddress) {
+      audioRef.current?.pause();
+      audioRef.current?.removeAttribute("src");
+      audioRef.current?.load();
+      setStreamUrl(null);
+      setPlaybackSession(null);
+      setActiveTrack(null);
+      setIsPlaying(false);
+      setCurrentTime(0);
+      setDuration(0);
+      clearActiveAdState();
+    }
+    previousPlaybackWallet.current = session?.walletAddress;
+  }, [session?.walletAddress, clearActiveAdState]);
 
   const activeTrackIndex = playbackQueue.findIndex(
     (track) => track.id === activeTrack?.id,
@@ -1045,12 +1149,6 @@ export const GlobalPlaybackProvider = ({ children }: { children: ReactNode }) =>
     setCurrentTime(nextTime);
   };
 
-  const setVolumeLevel = (value: number) => {
-    setVolume(value);
-    if (audioRef.current) {
-      audioRef.current.volume = value;
-    }
-  };
 
   const dismissPlayback = useCallback(async () => {
     const audio = audioRef.current;
@@ -1083,6 +1181,8 @@ export const GlobalPlaybackProvider = ({ children }: { children: ReactNode }) =>
     setPlaybackSession(null);
     setStreamUrl(null);
     setActiveTrack(null);
+    setGuestLimitReached(false);
+    guestPromptOpenedRef.current = false;
     clearActiveAdState();
     lastObservedPlaybackPositionRef.current = null;
     unreportedListenSecondsRef.current = 0;
@@ -1114,6 +1214,7 @@ export const GlobalPlaybackProvider = ({ children }: { children: ReactNode }) =>
       seekTo,
       skipBy,
       setVolumeLevel,
+      toggleMute,
       setPlaybackQueue,
     }),
     [
@@ -1136,7 +1237,7 @@ export const GlobalPlaybackProvider = ({ children }: { children: ReactNode }) =>
   return (
     <GlobalPlaybackContext.Provider value={value}>
       {children}
-      <audio ref={audioRef} preload="metadata" />
+      <audio ref={audioRef} preload="metadata" crossOrigin="anonymous" />
       <GlobalPlaybackBar
       activeTrack={activeTrack}
       isPlaying={isPlaying}
@@ -1153,7 +1254,40 @@ export const GlobalPlaybackProvider = ({ children }: { children: ReactNode }) =>
       dismissPlayback={dismissPlayback}
         seekTo={seekTo}
         setVolumeLevel={setVolumeLevel}
+        toggleMute={toggleMute}
       />
+      {guestLimitReached ? (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm">
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="guest-playback-limit-title"
+            className="w-full max-w-md rounded-2xl border border-white/10 bg-[#101625] p-6 text-white shadow-2xl"
+          >
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-300">Free listening</p>
+            <h2 id="guest-playback-limit-title" className="mt-3 text-xl font-semibold">Keep listening</h2>
+            <p className="mt-2 text-sm leading-6 text-slate-300">
+              You’ve used your 25 free minutes. Sign in to keep listening.
+            </p>
+            <div className="mt-6 flex flex-col gap-2 sm:flex-row">
+              <button
+                type="button"
+                onClick={() => void connectWallet()}
+                className="rounded-lg bg-emerald-400 px-4 py-2.5 text-sm font-semibold text-slate-950 transition hover:bg-emerald-300"
+              >
+                Sign in
+              </button>
+              <button
+                type="button"
+                onClick={() => void dismissPlayback()}
+                className="rounded-lg border border-white/15 px-4 py-2.5 text-sm font-medium text-slate-200 transition hover:bg-white/5"
+              >
+                Keep browsing
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </GlobalPlaybackContext.Provider>
   );
 };

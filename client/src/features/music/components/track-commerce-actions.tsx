@@ -1,12 +1,13 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { LoaderCircle, Play, ShoppingBag } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Check, LoaderCircle, Play, ShoppingBag } from "lucide-react";
 import { toast } from "sonner";
 
 import type { ArtistPublicProfile, TrackSummary } from "@music-city/shared";
 
 import { Button } from "@/components/ui/button";
+import { playbackApi } from "@/features/playback/lib/playback-api";
 import { paymentsApi } from "@/features/payments/lib/payments-api";
 import { useStellarCheckout } from "@/features/payments/hooks/use-stellar-checkout";
 import { useGlobalPlayback } from "@/features/playback/providers/global-playback-provider";
@@ -32,9 +33,41 @@ export const TrackCommerceActions = ({
   hidePlay?: boolean;
 }) => {
   const { session } = useAuth();
-  const { activeTrackId, playTrack } = useGlobalPlayback();
+  const { activeTrackId, playTrack, setPlaybackQueue } = useGlobalPlayback();
   const runCheckout = useStellarCheckout();
   const [isBuying, setIsBuying] = useState(false);
+  const buyButton = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!hidePlay && track.playbackReady) playbackApi.preloadTracks(session?.token, [track]);
+  }, [hidePlay, track.id, track.playbackReady, session?.token]);
+  const [purchased, setPurchased] = useState(false);
+  const [checkingPurchase, setCheckingPurchase] = useState(false);
+  useEffect(() => {
+    let current = true;
+    setPurchased(false);
+    if (!session?.token || !track.purchaseEnabled) return;
+    setCheckingPurchase(true);
+    void paymentsApi
+      .listMine(session.token)
+      .then((items) => {
+        if (current)
+          setPurchased(
+            items.some(
+              (payment) =>
+                payment.trackId === track.id &&
+                payment.productType === "track_purchase" &&
+                payment.status === "confirmed",
+            ),
+          );
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (current) setCheckingPurchase(false);
+      });
+    return () => {
+      current = false;
+    };
+  }, [session?.token, track.id, track.purchaseEnabled]);
 
   const purchaseLabel = useMemo(
     () => formatAmountLabel(track.purchasePrice, track.purchaseAssetCode),
@@ -59,14 +92,19 @@ export const TrackCommerceActions = ({
 
     try {
       setIsBuying(true);
-      const intent = await paymentsApi.createTrackPurchaseIntent(token, track.id);
+      const intent = await paymentsApi.createTrackPurchaseIntent(
+        token,
+        track.id,
+      );
       const txHash = await runCheckout(intent);
       await paymentsApi.confirm(token, {
         intentId: intent.id,
         txHash,
       });
+      setPurchased(true);
       toast.success("Track unlocked.");
       await onUnlocked?.();
+      if (activeTrackId !== track.id) setPlaybackQueue([track]);
       await playTrack(track);
     } catch (error) {
       toast.error(
@@ -74,11 +112,13 @@ export const TrackCommerceActions = ({
       );
     } finally {
       setIsBuying(false);
+      requestAnimationFrame(() => buyButton.current?.focus());
     }
   };
 
   const handlePlay = async () => {
     try {
+      if (activeTrackId !== track.id) setPlaybackQueue([track]);
       await playTrack(track);
     } catch (error) {
       toast.error(
@@ -92,7 +132,7 @@ export const TrackCommerceActions = ({
       {!hidePlay ? (
         <Button
           className="bg-emerald-400 text-slate-950 hover:bg-emerald-300"
-          disabled={!track.playbackReady || !session?.token}
+          disabled={!track.playbackReady}
           onClick={() => void handlePlay()}
         >
           <Play className="mr-2 h-4 w-4 fill-current" />
@@ -100,10 +140,16 @@ export const TrackCommerceActions = ({
         </Button>
       ) : null}
 
-      {track.purchaseEnabled ? (
+      {track.purchaseEnabled && purchased ? (
+        <span className="inline-flex items-center gap-2 text-sm text-emerald-400">
+          <Check className="h-4 w-4" />
+          Purchased
+        </span>
+      ) : track.purchaseEnabled ? (
         <Button
+          ref={buyButton}
           className="bg-emerald-400 text-slate-950 hover:bg-emerald-300"
-          disabled={isBuying}
+          disabled={isBuying || checkingPurchase}
           onClick={() => void handleBuyTrack()}
         >
           {isBuying ? (
@@ -114,7 +160,6 @@ export const TrackCommerceActions = ({
           {purchaseLabel ? `Buy ${purchaseLabel}` : "Buy track"}
         </Button>
       ) : null}
-
     </div>
   );
 };

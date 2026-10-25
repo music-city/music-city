@@ -31,17 +31,19 @@ const usesHttps = (value: string) => value.startsWith("https://");
 const usesTestnetHost = (value: string) => /testnet/i.test(value);
 const isDefaultSecret = (value: string, defaults: string[]) => defaults.includes(value);
 
-const envSchema = z
+export const envSchema = z
   .object({
     NODE_ENV: z
       .enum(["development", "test", "production"])
       .default("development"),
     PORT: z.coerce.number().default(4319),
+    TRUST_PROXY_HOPS: z.coerce.number().int().nonnegative().default(0),
     CLIENT_ORIGIN: z.string().default("http://localhost:4317"),
     ADMIN_CLIENT_ORIGIN: z.string().default("http://localhost:4318"),
     DATABASE_URL: z.string().min(1),
     JWT_SECRET: z.string().default("music-city-dev-secret"),
     ADMIN_JWT_SECRET: z.string().default("music-city-admin-secret"),
+    ADMIN_BOOTSTRAP_TOKEN: z.string().default("music-city-local-bootstrap-token"),
     STELLAR_NETWORK_PASSPHRASE: z
       .string()
       .default("Test SDF Network ; September 2015"),
@@ -64,6 +66,7 @@ const envSchema = z
       .default("data/media")
       .transform(normalizeLocalRoot),
     PLAYBACK_TOKEN_SECRET: z.string().default("music-city-playback-secret"),
+    GUEST_PLAYBACK_ENABLED: z.string().optional().transform((value) => value !== "false"),
     DYNAMIC_ENVIRONMENT_ID: z.string().optional(),
     DYNAMIC_JWKS_URL: z.string().optional(),
     STELLAR_HORIZON_URL: z.string().default("https://horizon-testnet.stellar.org"),
@@ -79,10 +82,11 @@ const envSchema = z
     STELLAR_ACCESS_ASSET_ISSUER: z.string().optional(),
     STELLAR_TREASURY_ADDRESS: z.string().optional(),
     AGREEMENT_TREASURY_ADDRESS: z.string().optional(),
-    STELLAR_TREASURY_SECRET: z.string().optional(),
     STELLAR_SETTLEMENT_ASSET_CODE: z.string().default("XLM"),
     STELLAR_SETTLEMENT_ASSET_ISSUER: z.string().optional(),
     ROYALTY_REGISTRY_CONTRACT_ID: z.string().optional(),
+    SETTLEMENT_CONTRACT_ID: z.string().optional(),
+    SETTLEMENT_DEPLOYMENT_LEDGER: z.coerce.number().int().positive().optional(),
     ROYALTY_PAYOUT_APPROVAL_MODE: z.enum(["admin", "automatic"]).default("admin"),
     ROYALTY_PAYOUT_CADENCE: z
       .enum(["manual", "daily", "weekly", "monthly"])
@@ -185,6 +189,31 @@ const envSchema = z
           message: "MUX_TOKEN_SECRET is required when MEDIA_PROVIDER=mux",
         });
       }
+
+      if (value.NODE_ENV === "production" && !hasValue(value.MUX_WEBHOOK_SECRET)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["MUX_WEBHOOK_SECRET"],
+          message: "Production Mux media requires MUX_WEBHOOK_SECRET.",
+        });
+      }
+
+      if (value.NODE_ENV === "production") {
+        if (!hasValue(value.MUX_SIGNING_KEY)) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["MUX_SIGNING_KEY"],
+            message: "Production Mux playback requires MUX_SIGNING_KEY.",
+          });
+        }
+        if (!hasValue(value.MUX_PRIVATE_KEY)) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["MUX_PRIVATE_KEY"],
+            message: "Production Mux playback requires MUX_PRIVATE_KEY.",
+          });
+        }
+      }
     }
 
     if (value.NODE_ENV === "production" && value.STORAGE_PROVIDER === "local") {
@@ -197,6 +226,17 @@ const envSchema = z
     }
 
     if (value.NODE_ENV === "production") {
+      if (
+        value.ADMIN_BOOTSTRAP_TOKEN.trim().length < 32 ||
+        value.ADMIN_BOOTSTRAP_TOKEN === "music-city-local-bootstrap-token"
+      ) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["ADMIN_BOOTSTRAP_TOKEN"],
+          message: "Production requires a unique ADMIN_BOOTSTRAP_TOKEN of at least 32 characters.",
+        });
+      }
+
       if (
         isDefaultSecret(value.JWT_SECRET, ["music-city-dev-secret"]) ||
         value.JWT_SECRET.trim().length < 24

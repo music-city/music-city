@@ -36,7 +36,7 @@ adminRouter.post(
 adminRouter.post(
   "/auth/login",
   asyncHandler(async (request, response) => {
-    const result = await adminService.login(request.body);
+    const result = await adminService.login(request.body, request.ip);
     const token = tokenService.issueAdminSession(result.session);
 
     response.json({
@@ -216,15 +216,7 @@ adminRouter.get(
   }),
 );
 
-adminRouter.put(
-  "/royalties/payout-settings",
-  requireAdminSession,
-  asyncHandler(async (request, response) => {
-    response.json({
-      settings: await adminService.updateRoyaltyPayoutSettings(request.body),
-    });
-  }),
-);
+
 
 adminRouter.get(
   "/royalties/fee-settings",
@@ -236,15 +228,7 @@ adminRouter.get(
   }),
 );
 
-adminRouter.put(
-  "/royalties/fee-settings",
-  requireAdminSession,
-  asyncHandler(async (request, response) => {
-    response.json({
-      settings: await adminService.updateRoyaltyFeeSettings(request.body),
-    });
-  }),
-);
+
 
 adminRouter.get(
   "/royalties/tracks/:trackId/splits",
@@ -325,21 +309,9 @@ adminRouter.get(
   }),
 );
 
-adminRouter.post(
-  "/royalties/payouts/run",
-  requireAdminSession,
-  asyncHandler(async (request, response) => {
-    response.json(await adminService.runRoyaltyPayouts(request.body));
-  }),
-);
 
-adminRouter.post(
-  "/royalties/payouts/reconcile",
-  requireAdminSession,
-  asyncHandler(async (request, response) => {
-    response.json(await adminService.reconcileRoyaltyPayouts(request.body));
-  }),
-);
+
+
 
 adminRouter.get(
   "/treasury",
@@ -349,24 +321,8 @@ adminRouter.get(
   }),
 );
 
-adminRouter.put(
-  "/treasury",
-  requireAdminSession,
-  requireSuperAdmin,
-  asyncHandler(async (request, response) => {
-    response.json(await adminService.updateTreasurySettings(request.body));
-  }),
-);
 
-adminRouter.post(
-  "/treasury/transfers",
-  requireAdminSession,
-  requireSuperAdmin,
-  asyncHandler(async (request, response) => {
-    response.status(201).json({
-      transfer: await adminService.submitTreasuryTransfer(request.body),
-    });
-  }),
-);
+
+
 
 export { adminRouter };

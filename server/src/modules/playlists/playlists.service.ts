@@ -22,7 +22,7 @@ const hydrateTrackUrls = <T extends { coverStorageKey?: string; coverImageUrl?: 
   const nextTrack = {
     ...track,
     coverImageUrl: track.coverStorageKey
-      ? storageService.getDownloadUrl(track.coverStorageKey)
+      ? storageService.getImageUrl(track.coverStorageKey)
       : track.coverImageUrl,
   } as T & {
     masterStorageKey?: string;
@@ -39,6 +39,18 @@ const hydrateTrackUrls = <T extends { coverStorageKey?: string; coverImageUrl?: 
 
   return nextTrack;
 };
+
+const publicTrackMediaView = (track: TrackSummary): TrackSummary => ({
+  ...track,
+  playbackUrl: undefined,
+  streamManifestUrl: undefined,
+  streamMediaUrl: undefined,
+  masterStorageKey: undefined,
+  streamManifestKey: undefined,
+  muxUploadId: undefined,
+  muxAssetId: undefined,
+  muxPlaybackId: undefined,
+});
 
 const ensureOwnerProfile = async (walletAddress: string) => {
   const profile = await usersService.getProfile(walletAddress);
@@ -62,7 +74,9 @@ const toPlaylistDetail = async (
         ? {
             trackId: assignment.track_id,
             position: assignment.position,
-            track: hydrateTrackUrls(track),
+            track: includePrivateTracks
+              ? hydrateTrackUrls(track)
+              : publicTrackMediaView(hydrateTrackUrls(track)),
             isPublic: await tracksService.isTrackPublic(track.id),
           }
         : null;

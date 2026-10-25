@@ -1,9 +1,17 @@
+import { supportSchemaStatements } from "../modules/support/support-schema.js";
+import { checkoutSchemaStatements } from "../modules/payments/checkout-schema.js";
+import { settlementChainEventSchemaStatements } from "../modules/settlements/chain-event-schema.js";
+import { settlementSchemaStatements } from "../modules/settlements/settlement-schema.js";
+import { publicationSchemaStatements } from "../modules/publication/publication-schema.js";
+import type { ReleaseDetail, ReleaseSummary, TrackSummary, TrackMetadataUpdateInput, ReleaseTrackMetadataInput } from "@music-city/shared";
 import { referralSchemaStatements, referralActivationSchemaStatements, referralCampaignControlStatements } from "../modules/referrals/referral-schema.js";
 import { Pool, type PoolClient } from "pg";
 import { agreementSchemaStatements } from "../modules/agreements/agreement-schema.js";
-import { finalizationSchemaStatements, finalizationIntegrityStatements } from "../modules/agreements/finalization-schema.js";
-import { sponsorshipSchemaStatements } from "../modules/sponsorships/sponsorship-schema.js";
+import { finalizationSchemaStatements, finalizationIntegrityStatements, agreementRecoveryStatements } from "../modules/agreements/finalization-schema.js";
+import { sponsorshipCapacityMigrationStatements, sponsorshipSchemaStatements } from "../modules/sponsorships/sponsorship-schema.js";
+import { guestPlaybackSchemaStatements, expandedGuestPlaybackSchemaStatements } from "../modules/playback/guest-playback-schema.js";
 
+import { liveRecording } from "../modules/releases/live-recording.js";
 import { env } from "../config/env.js";
 
 type PersistedRow = {
@@ -116,6 +124,13 @@ const pool = new Pool({
 });
 
 const baseSchemaStatements = [
+  `CREATE TABLE IF NOT EXISTS admin_auth_rate_limits (
+    bucket_key TEXT PRIMARY KEY,
+    window_started_at TIMESTAMPTZ NOT NULL,
+    attempt_count INTEGER NOT NULL CHECK(attempt_count >= 0),
+    blocked_until TIMESTAMPTZ
+  )`,
+  "CREATE INDEX IF NOT EXISTS admin_auth_rate_limits_window_idx ON admin_auth_rate_limits (window_started_at)",
   `CREATE TABLE IF NOT EXISTS admins (
     id TEXT PRIMARY KEY,
     email TEXT NOT NULL UNIQUE,
@@ -395,13 +410,22 @@ const schemaMigrationTableStatement = `CREATE TABLE IF NOT EXISTS schema_migrati
 )`;
 
 const schemaMigrations: SchemaMigration[] = [
+  { name: "2026-10-19-guest-playback", statements: guestPlaybackSchemaStatements },
+  { name: "2026-10-20-guest-listening-time", statements: expandedGuestPlaybackSchemaStatements },
+  { name: "2026-10-17-durable-checkout", statements: checkoutSchemaStatements },
+  { name: "2026-10-15-direct-support", statements: supportSchemaStatements },
+  { name: "2026-10-14-background-publication", statements: publicationSchemaStatements },
   { name: "2026-10-09-early-user-sponsorship", statements: sponsorshipSchemaStatements },
+  { name: "2026-10-11-early-user-sponsorship-capacity", statements: sponsorshipCapacityMigrationStatements },
   { name: "2026-10-08-registration-referrals", statements: referralSchemaStatements },
   { name: "2026-10-08-referral-paid-activation", statements: referralActivationSchemaStatements },
   { name: "2026-10-08-referral-campaign-controls", statements: referralCampaignControlStatements },
   { name: "2026-10-02-contributor-agreements", statements: agreementSchemaStatements },
   { name: "2026-10-02-agreement-finalization", statements: finalizationSchemaStatements },
   { name: "2026-10-02-agreement-finalization-integrity", statements: finalizationIntegrityStatements },
+  { name: "2026-10-17-agreement-recovery", statements: agreementRecoveryStatements },
+  { name: "2026-10-15-earnings-settlement", statements: settlementSchemaStatements },
+  { name: "2026-10-15-settlement-chain-events", statements: settlementChainEventSchemaStatements },
   {
     name: "2026-10-05-single-use-stellar-auth-challenges",
     statements: [
@@ -881,10 +905,16 @@ const mapPayloadRows = <T>(rows: PersistedRow[]) =>
   rows.map((row) => row.payload as T);
 
 const criticalSchemaExpectationGroups: SchemaExpectationGroup[] = [
+  { name: "2026-10-19-guest-playback", migrationName: "2026-10-19-guest-playback", relations: ["guest_playback_allowances"], indexes: ["guest_playback_allowances_expires_idx"], statements: guestPlaybackSchemaStatements },
+  { name: "2026-10-20-guest-listening-time", migrationName: "2026-10-20-guest-listening-time", relations: ["guest_playback_allowances"], indexes: [], statements: expandedGuestPlaybackSchemaStatements },
+  { name: "2026-10-17-durable-checkout", migrationName: "2026-10-17-durable-checkout", relations: ["payment_checkouts", "checkout_events"], indexes: ["checkout_one_active_wallet", "checkout_reconcile_idx"], statements: checkoutSchemaStatements },
+  { name: "2026-10-17-agreement-recovery", migrationName: "2026-10-17-agreement-recovery", relations: ["agreement_finalizations"], indexes: ["agreement_finalization_recovery"], statements: agreementRecoveryStatements },
+  { name: "2026-10-15-direct-support", migrationName: "2026-10-15-direct-support", relations: ["support_payments", "support_events"], indexes: ["support_one_active_sender", "support_recipient_idx", "support_reconcile_idx"], statements: supportSchemaStatements },
   {
     name: "base-core",
     relations: [
       "admins",
+      "admin_auth_rate_limits",
       "app_settings",
       "users",
       "tracks",
@@ -907,12 +937,34 @@ const criticalSchemaExpectationGroups: SchemaExpectationGroup[] = [
     ],
     indexes: [
       "tracks_artist_id_idx",
+      "admin_auth_rate_limits_window_idx",
       "playback_sessions_track_id_idx",
       "royalty_ledger_status_idx",
       "ads_status_idx",
       "ad_impressions_ad_id_idx",
     ],
     statements: baseSchemaStatements,
+  },
+  {
+    name:"2026-10-15-settlement-chain-events",
+    migrationName:"2026-10-15-settlement-chain-events",
+    relations:["settlement_chain_events","settlement_chain_cursors","settlement_reconciliation_snapshots"],
+    indexes:["settlement_chain_events_batch_idx"],
+    statements:settlementChainEventSchemaStatements,
+  },
+  {
+    name: "2026-10-15-earnings-settlement",
+    migrationName: "2026-10-15-earnings-settlement",
+    relations: ["settlement_batches", "settlement_reservations", "financial_attempts", "settlement_events"],
+    indexes: ["financial_one_active_source", "financial_attempts_reconcile_idx"],
+    statements: settlementSchemaStatements,
+  },
+  {
+    name: "2026-10-14-background-publication",
+    migrationName: "2026-10-14-background-publication",
+    relations: ["publication_requests", "media_jobs"],
+    indexes: ["publication_requests_active_idx", "publication_requests_due_idx", "media_jobs_due_idx"],
+    statements: publicationSchemaStatements,
   },
   {
     name: "2026-10-09-onboarding-artist-activation-step",
@@ -933,10 +985,11 @@ const criticalSchemaExpectationGroups: SchemaExpectationGroup[] = [
     statements: referralSchemaStatements,
   },
   {
-    name: "2026-10-09-early-user-sponsorship",
-    migrationName: "2026-10-09-early-user-sponsorship",
+    name: "2026-10-11-early-user-sponsorship-capacity",
+    migrationName: "2026-10-11-early-user-sponsorship-capacity",
     relations: ["artist_sponsorship_campaigns", "artist_sponsorship_eligibilities", "artist_sponsorship_grants", "artist_sponsorship_events"],
     indexes: ["artist_sponsorship_eligibilities_campaign_idx", "artist_sponsorship_events_created_idx"],
+    columns: ["artist_sponsorship_campaigns.max_grants"],
     statements: sponsorshipSchemaStatements,
   },
   {
@@ -1111,25 +1164,26 @@ const inspectSchemaGroups = async (): Promise<SchemaExpectationStatus[]> => {
 };
 
 const applySchemaExpectationRepair = async (group: SchemaExpectationGroup) => {
-  await pool.query("BEGIN");
+  const client = await pool.connect();
+  await client.query("BEGIN");
 
   try {
     for (const statement of group.statements) {
-      await pool.query(statement);
+      await client.query(statement);
     }
 
     if (group.migrationName) {
-      await pool.query(
+      await client.query(
         "INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT (name) DO NOTHING",
         [group.migrationName],
       );
     }
 
-    await pool.query("COMMIT");
+    await client.query("COMMIT");
   } catch (error) {
-    await pool.query("ROLLBACK");
+    await client.query("ROLLBACK");
     throw error;
-  }
+  } finally { client.release(); }
 };
 
 export const databaseService = {
@@ -1194,6 +1248,9 @@ export const databaseService = {
       }
 
       await this.transaction(async (client) => {
+        await client.query("SELECT pg_advisory_xact_lock(hashtextextended('music-city-schema-migrations', 0))");
+        const recorded = await client.query("SELECT 1 FROM schema_migrations WHERE name=$1", [migration.name]);
+        if (recorded.rows.length) return;
         for (const statement of migration.statements) {
           await client.query(statement);
         }
@@ -1297,6 +1354,45 @@ export const databaseService = {
     await pool.query(`DELETE FROM ${table} WHERE id = $1`, [id]);
   },
 
+  async beginReleaseRevision(id: string, artistId: string, liveVersion: ReleaseDetail): Promise<ReleaseSummary & {liveVersion: ReleaseDetail}> {
+    return this.transaction(async client => {
+      const row = await client.query<{payload: ReleaseSummary & {liveVersion?: ReleaseDetail}}>("SELECT payload FROM releases WHERE id=$1 AND artist_id=$2 FOR UPDATE",[id,artistId]);
+      const current = row.rows[0]?.payload;
+      if (!current) throw new Error("Release not found");
+      if (current.liveVersion) return current as ReleaseSummary & {liveVersion: ReleaseDetail};
+      if (current.updatedAt !== liveVersion.updatedAt || !["published","scheduled"].includes(current.status)) throw new Error("The release changed. Reload before starting a revision.");
+      const next = {...current,liveVersion,updatedAt:new Date().toISOString()};
+      await client.query("UPDATE releases SET payload=$2::jsonb WHERE id=$1",[id,JSON.stringify(next)]);
+      return next;
+    });
+  },
+
+  async commitReleaseRevision(artistId: string, expectedUpdatedAt: string | undefined, release: ReleaseSummary, assignments: ReleaseTrackRow[]): Promise<ReleaseSummary> {
+    return this.transaction(async client => {
+      const row = await client.query<{payload: ReleaseSummary & {liveVersion?: ReleaseDetail}}>("SELECT payload FROM releases WHERE id=$1 AND artist_id=$2 FOR UPDATE",[release.id,artistId]);
+      const current=row.rows[0]?.payload;
+      if (!current?.liveVersion || current.updatedAt !== expectedUpdatedAt) throw new Error("The revision changed. Reload and review it before applying.");
+      const actual = await client.query<ReleaseTrackRow>("SELECT release_id,track_id,track_number,disc_number,is_focus_track FROM release_tracks WHERE release_id=$1 ORDER BY track_id FOR UPDATE",[release.id]);
+      const normalize=(items: ReleaseTrackRow[]) => JSON.stringify([...items].sort((a,b) => a.track_id.localeCompare(b.track_id)).map(item => [item.track_id,item.track_number,item.disc_number,item.is_focus_track]));
+      if (normalize(actual.rows) !== normalize(assignments)) throw new Error("The tracklist changed. Review the revision again.");
+      const nextIds=actual.rows.map(item => item.track_id);
+      const allIds=[...new Set([...nextIds,...current.liveVersion.tracks.map(item => item.trackId)])].sort();
+      const tracks=await client.query<{id:string;artist_id:string;payload:TrackSummary}>("SELECT id,artist_id,payload FROM tracks WHERE id=ANY($1::text[]) ORDER BY id FOR UPDATE",[allIds]);
+      if (tracks.rows.length !== allIds.length || tracks.rows.some(track => track.artist_id !== artistId) || tracks.rows.some(track => nextIds.includes(track.id) && !track.payload.playbackReady)) throw new Error("Every recording must belong to you and finish processing before applying the revision");
+      for (const track of tracks.rows) {
+        const published=release.status === "published" && nextIds.includes(track.id);
+        await client.query("UPDATE tracks SET visibility=$2,payload=payload || $3::jsonb WHERE id=$1",[track.id,published ? "published" : "unpublished",JSON.stringify({visibility:published ? "published" : "unpublished",priceLabel:published ? "Published" : "Unpublished",updatedAt:release.updatedAt})]);
+      }
+      await client.query("UPDATE releases SET type=$2,status=$3,release_date=$4,payload=$5::jsonb WHERE id=$1",[release.id,release.type,release.status,release.releaseDate ?? null,JSON.stringify(release)]);
+      return release;
+    });
+  },
+
+  async listLiveTrackSnapshots(): Promise<TrackSummary[]> {
+    const result=await pool.query<{snapshot:TrackSummary;current:TrackSummary}>(`SELECT item->'track' AS snapshot, t.payload AS current FROM releases r CROSS JOIN LATERAL jsonb_array_elements(COALESCE(r.payload->'liveVersion'->'tracks','[]'::jsonb)) item JOIN tracks t ON t.id=item->>'trackId' WHERE r.status='published' OR (r.status='scheduled' AND r.release_date <= NOW())`);
+    return result.rows.map(row => liveRecording(row.current,row.snapshot));
+  },
+
   async upsertRelease(
     id: string,
     artistId: string,
@@ -1305,7 +1401,11 @@ export const databaseService = {
     releaseDate: string | null,
     payload: unknown,
   ) {
-    await pool.query(
+    await this.transaction(async client => {
+      const current = await client.query<{payload: ReleaseSummary & {liveVersion?: ReleaseDetail}}>("SELECT payload FROM releases WHERE id=$1 FOR UPDATE",[id]);
+      if (current.rows[0] && current.rows[0].payload.status === "published" && !current.rows[0].payload.liveVersion && !["archived","draft"].includes((payload as ReleaseSummary).status)) throw new Error("Start a revision before editing a live release");
+      await client.query("UPDATE publication_requests SET state='cancelled',updated_at=NOW() WHERE release_id=$1 AND state IN ('processing','scheduled')",[id]);
+      await client.query(
       `INSERT INTO releases (id, artist_id, type, status, release_date, payload)
        VALUES ($1, $2, $3, $4, $5, $6::jsonb)
        ON CONFLICT (id) DO UPDATE SET
@@ -1316,6 +1416,7 @@ export const databaseService = {
          payload = EXCLUDED.payload`,
       [id, artistId, type, status, releaseDate, JSON.stringify(payload)],
     );
+    });
   },
 
   async listReleasesByArtist<T>(artistId: string) {
@@ -1333,6 +1434,53 @@ export const databaseService = {
     await pool.query(`DELETE FROM releases WHERE id = $1`, [id]);
   },
 
+  async updateTrackMetadata(id: string, artistId: string, patch: TrackMetadataUpdateInput & { updatedAt: string }) {
+    const clear = Object.entries(patch).filter(([, value]) => value === undefined).map(([field]) => field);
+    return this.transaction(async client => {
+    const releases = await client.query<{id:string;payload: ReleaseSummary & {liveVersion?:ReleaseDetail}}>("SELECT r.id,r.payload FROM releases r JOIN release_tracks rt ON rt.release_id=r.id WHERE rt.track_id=$1 ORDER BY r.id FOR UPDATE OF r",[id]);
+    if (releases.rows.some(r => ["published","scheduled"].includes(r.payload.status) && !r.payload.liveVersion)) throw new Error("Start a release revision before editing this recording");
+    await client.query("UPDATE publication_requests SET state='cancelled',updated_at=NOW() WHERE release_id=ANY($1::text[]) AND state IN ('processing','scheduled')",[releases.rows.map(r => r.id)]);
+    const result = await client.query<{ payload: TrackSummary }>(
+      `UPDATE tracks SET payload = (payload - $3::text[]) || $4::jsonb
+       WHERE id=$1 AND artist_id=$2 RETURNING payload`,
+      [id, artistId, clear, JSON.stringify(patch)],
+    );
+    return result.rows[0]?.payload ?? null;
+    });
+  },
+
+  async getTrackReleaseContext(trackId: string) {
+    const result = await pool.query<{ releaseId: string; releaseTitle: string; releaseArtistName: string; trackNumber: number; discNumber: number; isFocusTrack: boolean }>(
+      `SELECT r.id AS "releaseId", r.payload->>'title' AS "releaseTitle", r.payload->>'artistName' AS "releaseArtistName",
+        rt.track_number AS "trackNumber", rt.disc_number AS "discNumber", rt.is_focus_track AS "isFocusTrack"
+       FROM release_tracks rt JOIN releases r ON r.id=rt.release_id JOIN tracks t ON t.id=rt.track_id
+       WHERE rt.track_id=$1 AND r.artist_id=t.artist_id`, [trackId],
+    );
+    return result.rows[0] ?? null;
+  },
+
+  async applyReleaseTrackMetadata(artistId: string, releaseId: string, input: ReleaseTrackMetadataInput): Promise<TrackSummary[]> {
+    return this.transaction(async client => {
+      const release = await client.query("SELECT artist_id FROM releases WHERE id=$1 FOR UPDATE", [releaseId]);
+      if (release.rows[0]?.artist_id !== artistId) throw new Error("Release not found");
+      const assignments = await client.query("SELECT track_id FROM release_tracks WHERE release_id=$1 AND track_id=ANY($2::text[]) ORDER BY track_id FOR UPDATE", [releaseId, input.trackIds]);
+      if (assignments.rows.length !== input.trackIds.length) throw new Error("Every selected track must belong to this release");
+      const tracks = await client.query<{ id: string; artist_id: string; payload: TrackSummary }>("SELECT id, artist_id, payload FROM tracks WHERE id=ANY($1::text[]) ORDER BY id FOR UPDATE", [input.trackIds]);
+      if (tracks.rows.length !== input.trackIds.length || tracks.rows.some(track => track.artist_id !== artistId)) throw new Error("Track not found");
+      for (const track of tracks.rows) {
+        const current = track.payload.recordLabel ?? "";
+        if (current !== input.expectedLabels[track.id]) throw new Error("A track label changed. Refresh the preview before applying it.");
+        if (current.trim() && !input.overwrite) throw new Error("Choose overwrite before replacing existing track labels");
+      }
+      const timestamp = new Date().toISOString();
+      const result = await client.query<{ payload: TrackSummary }>(
+        "UPDATE tracks SET payload = payload || jsonb_build_object('recordLabel', $2::text, 'updatedAt', $3::text) WHERE id=ANY($1::text[]) RETURNING payload",
+        [input.trackIds, input.recordLabel, timestamp],
+      );
+      return result.rows.map(row => row.payload);
+    });
+  },
+
   async assignTrackToRelease(
     releaseId: string,
     trackId: string,
@@ -1340,7 +1488,11 @@ export const databaseService = {
     discNumber: number,
     isFocusTrack: boolean,
   ) {
-    await pool.query(
+    await this.transaction(async client => {
+      const row = (await client.query<{payload: ReleaseSummary & {liveVersion?: ReleaseDetail}}>("SELECT payload FROM releases WHERE id=$1 FOR UPDATE",[releaseId])).rows[0];
+      if (!row || (["published","scheduled"].includes(row.payload.status) && !row.payload.liveVersion)) throw new Error("Start a revision before changing a live release");
+      await client.query("UPDATE publication_requests SET state='cancelled',updated_at=NOW() WHERE release_id=$1 AND state IN ('processing','scheduled')",[releaseId]);
+      await client.query(
       `INSERT INTO release_tracks (
          release_id,
          track_id,
@@ -1356,13 +1508,19 @@ export const databaseService = {
          is_focus_track = EXCLUDED.is_focus_track`,
       [releaseId, trackId, trackNumber, discNumber, isFocusTrack],
     );
+    });
   },
 
   async removeTrackFromRelease(releaseId: string, trackId: string) {
-    await pool.query(
+    await this.transaction(async client => {
+      const row = (await client.query<{payload: ReleaseSummary & {liveVersion?: ReleaseDetail}}>("SELECT payload FROM releases WHERE id=$1 FOR UPDATE",[releaseId])).rows[0];
+      if (!row || (["published","scheduled"].includes(row.payload.status) && !row.payload.liveVersion)) throw new Error("Start a revision before changing a live release");
+      await client.query("UPDATE publication_requests SET state='cancelled',updated_at=NOW() WHERE release_id=$1 AND state IN ('processing','scheduled')",[releaseId]);
+      await client.query(
       `DELETE FROM release_tracks WHERE release_id = $1 AND track_id = $2`,
       [releaseId, trackId],
     );
+    });
   },
 
   async listReleaseTracks(releaseId: string) {
@@ -1539,40 +1697,23 @@ export const databaseService = {
 
   async listPublicTrackIds(artistId?: string) {
     const result = await pool.query<TrackIdRow>(
-      `SELECT DISTINCT rt.track_id
-       FROM release_tracks AS rt
-       INNER JOIN releases AS r ON r.id = rt.release_id
-       INNER JOIN tracks AS t ON t.id = rt.track_id
-       WHERE (
-         r.status = 'published'
-         OR (r.status = 'scheduled' AND r.release_date IS NOT NULL AND r.release_date <= NOW())
-       )
-       AND ($1::text IS NULL OR t.artist_id = $1)`,
-      [artistId ?? null],
-    );
-
-    return result.rows.map((row) => row.track_id);
+      `SELECT DISTINCT track_id FROM (
+        SELECT rt.track_id FROM release_tracks rt JOIN releases r ON r.id=rt.release_id
+        WHERE NOT (r.payload ? 'liveVersion') AND (r.status='published' OR (r.status='scheduled' AND r.release_date <= NOW())) AND ($1::text IS NULL OR r.artist_id=$1)
+        UNION ALL
+        SELECT item->>'trackId' AS track_id FROM releases r CROSS JOIN LATERAL jsonb_array_elements(COALESCE(r.payload->'liveVersion'->'tracks','[]'::jsonb)) item
+        WHERE (r.status='published' OR (r.status='scheduled' AND r.release_date <= NOW())) AND ($1::text IS NULL OR r.artist_id=$1)
+      ) live_tracks`,[artistId ?? null]);
+    return result.rows.map(row => row.track_id);
   },
 
   async isTrackInPublicRelease(trackId: string) {
-    const result = await pool.query<{ exists: boolean }>(
-      `SELECT EXISTS (
-         SELECT 1
-         FROM release_tracks AS rt
-         INNER JOIN releases AS r ON r.id = rt.release_id
-         WHERE rt.track_id = $1
-           AND (
-             r.status = 'published'
-             OR (r.status = 'scheduled' AND r.release_date IS NOT NULL AND r.release_date <= NOW())
-           )
-       ) AS exists`,
-      [trackId],
-    );
-
-    return Boolean(result.rows[0]?.exists);
+    return (await this.listPublicTrackIds()).includes(trackId);
   },
 
   async deleteTrack(id: string) {
+    const referenced=await pool.query(`SELECT 1 FROM releases r CROSS JOIN LATERAL jsonb_array_elements(COALESCE(r.payload->'liveVersion'->'tracks','[]'::jsonb)) item WHERE item->>'trackId'=$1 LIMIT 1`,[id]);
+    if (referenced.rows.length) throw new Error("This recording belongs to a live release revision. Apply the revision before deleting its audio.");
     await pool.query(`DELETE FROM tracks WHERE id = $1`, [id]);
   },
 
@@ -2697,6 +2838,77 @@ export const databaseService = {
     );
 
     return Number(result.rows[0]?.count ?? "0");
+  },
+
+  async createFirstAdmin(
+    id: string,
+    email: string,
+    role: string,
+    payload: unknown,
+  ) {
+    return this.transaction(async (client) => {
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended('music-city-admin-bootstrap',0))");
+      const count = await client.query<{ count: string }>("SELECT COUNT(*)::text AS count FROM admins");
+      if (Number(count.rows[0]?.count ?? "0") > 0) return false;
+      await client.query(
+        `INSERT INTO admins (id,email,role,payload) VALUES ($1,$2,$3,$4::jsonb)`,
+        [id,email,role,JSON.stringify(payload)],
+      );
+      return true;
+    });
+  },
+
+  async consumeAdminAuthRateLimits(bucketKeys: string[], maxAttempts = 5, windowSeconds = 900) {
+    return this.transaction(async (client) => {
+      const keys = [...new Set(bucketKeys)].sort();
+      await client.query(
+        "DELETE FROM admin_auth_rate_limits WHERE window_started_at < NOW() - INTERVAL '1 day' AND (blocked_until IS NULL OR blocked_until <= NOW())",
+      );
+      for (const key of keys) {
+        await client.query(
+          `INSERT INTO admin_auth_rate_limits(bucket_key,window_started_at,attempt_count)
+           VALUES($1,NOW(),0) ON CONFLICT(bucket_key) DO NOTHING`,
+          [key],
+        );
+      }
+      const rows = (await client.query<{
+        bucket_key: string;
+        window_started_at: Date | string;
+        attempt_count: number;
+        blocked_until: Date | string | null;
+      }>(
+        `SELECT bucket_key,window_started_at,attempt_count,blocked_until
+         FROM admin_auth_rate_limits WHERE bucket_key=ANY($1::text[])
+         ORDER BY bucket_key FOR UPDATE`,
+        [keys],
+      )).rows;
+      const now = Date.now();
+      if (rows.some((row) => row.blocked_until && new Date(row.blocked_until).getTime() > now)) {
+        return false;
+      }
+      for (const row of rows) {
+        const expired = new Date(row.window_started_at).getTime() <= now - windowSeconds * 1000;
+        const attemptCount = expired ? 1 : row.attempt_count + 1;
+        const windowStartedAt = expired ? new Date(now) : row.window_started_at;
+        const blockedUntil = attemptCount >= maxAttempts
+          ? new Date(now + windowSeconds * 1000)
+          : null;
+        await client.query(
+          `UPDATE admin_auth_rate_limits
+           SET window_started_at=$2,attempt_count=$3,blocked_until=$4
+           WHERE bucket_key=$1`,
+          [row.bucket_key,windowStartedAt,attemptCount,blockedUntil],
+        );
+      }
+      return true;
+    });
+  },
+
+  async clearAdminAuthRateLimits(bucketKeys: string[]) {
+    await pool.query(
+      "DELETE FROM admin_auth_rate_limits WHERE bucket_key=ANY($1::text[])",
+      [[...new Set(bucketKeys)]],
+    );
   },
 
   async upsertAdmin(

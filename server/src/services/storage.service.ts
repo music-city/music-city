@@ -7,8 +7,10 @@ import {
   readFileSync,
   rmSync,
 } from "node:fs";
-import { stat } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { stat, readFile } from "node:fs/promises";
+import { storedImageUrl } from "../modules/images/image-url.js";
+import { Readable, type Readable as ReadableType } from "node:stream";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import type { UploadSession } from "@music-city/shared";
 
 import { env } from "../config/env.js";
@@ -36,7 +38,29 @@ const ensureParent = (filePath: string) => {
   mkdirSync(dirname(filePath), { recursive: true });
 };
 
-const localMediaPath = (storageKey: string) => join(process.cwd(), env.LOCAL_MEDIA_ROOT, storageKey);
+const localMediaRoot = () => resolve(process.cwd(), env.LOCAL_MEDIA_ROOT);
+
+const localMediaPath = (storageKey: string) => {
+  if (
+    !storageKey ||
+    storageKey.includes("\0") ||
+    storageKey.includes("\\") ||
+    isAbsolute(storageKey) ||
+    storageKey.split("/").some((part) => part === ".." || part === ".")
+  ) {
+    throw new HttpError(400, "Invalid media key");
+  }
+
+  const root = localMediaRoot();
+  const filePath = resolve(root, storageKey);
+  const fromRoot = relative(root, filePath);
+
+  if (!fromRoot || fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot)) {
+    throw new HttpError(400, "Invalid media key");
+  }
+
+  return filePath;
+};
 
 const inferMimeType = (fileName: string) => {
   const extension = fileName.split(".").pop()?.toLowerCase();
@@ -48,11 +72,15 @@ const inferMimeType = (fileName: string) => {
       return "audio/wav";
     case "m4a":
       return "audio/mp4";
+    case "flac":
+      return "audio/flac";
     case "png":
       return "image/png";
     case "jpg":
     case "jpeg":
       return "image/jpeg";
+    case "webp":
+      return "image/webp";
     default:
       return "application/octet-stream";
   }
@@ -71,7 +99,7 @@ const buildS3PresignedUrl = ({
   storageKey,
   expiresInSeconds,
 }: {
-  method: "PUT" | "GET" | "DELETE";
+  method: "PUT" | "GET" | "HEAD" | "DELETE";
   storageKey: string;
   expiresInSeconds: number;
 }) => {
@@ -139,6 +167,52 @@ const buildS3PresignedUrl = ({
 };
 
 export const storageService = {
+  getImageUrl(storageKey: string) {
+    return storedImageUrl(storageKey);
+  },
+
+  async readStoredObject(storageKey: string, maximumBytes = 20 * 1024 * 1024): Promise<Buffer> {
+    if (env.STORAGE_PROVIDER === "local") {
+      let metadata: Awaited<ReturnType<typeof this.getObjectMetadata>>;
+      try { metadata = await this.getObjectMetadata(storageKey); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new HttpError(404, "Image not found");
+        throw error;
+      }
+      if (metadata.sizeBytes > maximumBytes) throw new HttpError(413, "Image exceeds the processing limit");
+      return readFile(metadata.filePath);
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20000);
+    try {
+      const url = buildS3PresignedUrl({ method: "GET", storageKey, expiresInSeconds: 300 });
+      const response = await fetch(url, { signal: controller.signal });
+      if (response.status === 404) throw new HttpError(404, "Image not found");
+      if (!response.ok || !response.body) throw new HttpError(502, "Could not read image storage");
+      if (Number(response.headers.get("content-length")) > maximumBytes) {
+        await response.body.cancel();
+        throw new HttpError(413, "Image exceeds the processing limit");
+      }
+      const chunks: Buffer[] = [];
+      let size = 0;
+      for await (const chunk of Readable.fromWeb(response.body as import("node:stream/web").ReadableStream)) {
+        size += chunk.length;
+        if (size > maximumBytes) { controller.abort(); throw new HttpError(413, "Image exceeds the processing limit"); }
+        chunks.push(Buffer.from(chunk));
+      }
+      return Buffer.concat(chunks);
+    } finally { clearTimeout(timeout); }
+  },
+
+  async putStoredObject(storageKey: string, body: Buffer, contentType: string) {
+    if (env.STORAGE_PROVIDER === "local") {
+      await this.saveLocalObject(storageKey, Readable.from(body));
+      return;
+    }
+    const target = this.createUploadTarget(storageKey);
+    await this.uploadRemoteObject(target.uploadUrl, "PUT", body, { "Content-Type": contentType });
+  },
+
   createUploadTarget(storageKey: string): Pick<
     UploadSession,
     "uploadUrl" | "method" | "headers" | "provider"
@@ -169,14 +243,23 @@ export const storageService = {
   async uploadRemoteObject(
     uploadUrl: string,
     method: "PUT",
-    body: Buffer,
+    body: Buffer | Readable,
     headers?: Record<string, string>,
+    contentLength?: number,
   ) {
-    const response = await fetch(uploadUrl, {
+    const requestHeaders = {
+      ...headers,
+      ...(!Buffer.isBuffer(body) && contentLength !== undefined
+        ? { "Content-Length": String(contentLength) }
+        : {}),
+    };
+    const requestInit = {
       method,
-      headers,
-      body,
-    });
+      headers: requestHeaders,
+      body: body as never,
+      ...(!Buffer.isBuffer(body) ? { duplex: "half" as const } : {}),
+    } as RequestInit;
+    const response = await fetch(uploadUrl, requestInit);
 
     if (!response.ok) {
       throw new HttpError(
@@ -249,11 +332,50 @@ export const storageService = {
     };
   },
 
+  async getStoredObjectMetadata(storageKey: string, fallbackFileName?: string) {
+    if (env.STORAGE_PROVIDER === "local") {
+      return this.getObjectMetadata(storageKey, fallbackFileName);
+    }
+
+    const url = buildS3PresignedUrl({ method: "HEAD", storageKey, expiresInSeconds: 300 });
+    const response = await fetch(url, { method: "HEAD" });
+    if (response.status === 404) throw new HttpError(404, "Uploaded file is missing");
+    if (!response.ok) throw new HttpError(502, "Could not verify uploaded file");
+    const sizeBytes = Number(response.headers.get("content-length"));
+    if (!Number.isSafeInteger(sizeBytes) || sizeBytes < 0) {
+      throw new HttpError(502, "Storage did not return a valid file size");
+    }
+    return {
+      sizeBytes,
+      contentType: response.headers.get("content-type")?.split(";")[0]?.trim() || inferMimeType(fallbackFileName ?? storageKey),
+    };
+  },
+
   createReadStream(storageKey: string, start?: number, end?: number) {
     return createReadStream(localMediaPath(storageKey), {
       start,
       end,
     });
+  },
+
+  async openStoredObjectRange(storageKey: string, start: number, end: number): Promise<{ stream: ReadableType; contentType: string; sizeBytes: number }> {
+    if (env.STORAGE_PROVIDER === "local") {
+      const metadata = await this.getObjectMetadata(storageKey);
+      return {
+        stream: this.createReadStream(storageKey, start, end),
+        contentType: metadata.contentType,
+        sizeBytes: metadata.sizeBytes,
+      };
+    }
+    const metadata = await this.getStoredObjectMetadata(storageKey);
+    const url = buildS3PresignedUrl({ method: "GET", storageKey, expiresInSeconds: 300 });
+    const response = await fetch(url, { headers: { Range: `bytes=${start}-${end}` } });
+    if (response.status !== 206 || !response.body) throw new HttpError(502, "Storage did not return the requested media range");
+    return {
+      stream: Readable.fromWeb(response.body as import("node:stream/web").ReadableStream),
+      contentType: response.headers.get("content-type")?.split(";")[0]?.trim() || metadata.contentType,
+      sizeBytes: metadata.sizeBytes,
+    };
   },
 
   readObject(storageKey: string) {
@@ -264,7 +386,7 @@ export const storageService = {
     return localMediaPath(storageKey);
   },
 
-  getDownloadUrl(storageKey: string, provider = env.STORAGE_PROVIDER) {
+  getDownloadUrl(storageKey: string, provider = env.STORAGE_PROVIDER, expiresInSeconds = 300) {
     if (provider === "local") {
       return `${env.APP_BASE_URL}/api/v1/uploads/content/${encodeURIComponent(
         storageKey,
@@ -274,7 +396,7 @@ export const storageService = {
     return buildS3PresignedUrl({
       method: "GET",
       storageKey,
-      expiresInSeconds: 300,
+      expiresInSeconds,
     });
   },
 };

@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import type { ReactNode } from "react";
 import type { TrackSummary } from "@music-city/shared";
 
@@ -54,10 +55,7 @@ export const formatTrackUploadedDate = (createdAt?: string) => {
 export const TrackThumbnail = ({ track }: { track: TrackSummary }) => {
   if (track.coverImageUrl) {
     return (
-      <div
-        className="h-12 w-12 shrink-0 rounded-lg bg-cover bg-center"
-        style={{ backgroundImage: `url(${track.coverImageUrl})` }}
-      />
+      <Image src={track.coverImageUrl} alt="" width={48} height={48} sizes="48px" maxWidth={192} className="h-12 w-12 shrink-0 rounded-lg object-cover" />
     );
   }
 
@@ -152,6 +150,9 @@ export const TrackTable = ({
                         {track.title}
                       </h3>
                     )}
+                    <p className="text-xs text-slate-400">
+                      {track.plays.toLocaleString()} {track.plays === 1 ? "stream" : "streams"}
+                    </p>
                   </div>
                 </div>
               </td>

@@ -22,6 +22,7 @@ import type { AuthSession } from "@music-city/shared";
 import { usersApi } from "@/features/users/lib/users-api";
 import { bindReferralWallet, clearReferral } from "@/features/referrals/referral-storage";
 import { clientEnv } from "@/lib/config/env";
+import { usableStoredSession } from "../lib/stored-session";
 import { authApi } from "../lib/auth-api";
 
 type AuthContextValue = {
@@ -61,7 +62,9 @@ const readStoredSession = () => {
   }
 
   try {
-    return JSON.parse(raw) as AuthSession;
+    const stored=usableStoredSession(raw);
+    if(!stored)window.localStorage.removeItem(AUTH_STORAGE_KEY);
+    return stored;
   } catch {
     window.localStorage.removeItem(AUTH_STORAGE_KEY);
     return null;
@@ -630,13 +633,6 @@ const DynamicAuthProvider = ({ children }: { children: ReactNode }) => {
   useEffect(() => {
     if (!sdkHasLoaded) {
       return;
-    }
-
-    if (user && showAuthFlow) {
-      logDynamicAuth("closing auth flow after Dynamic user resolved", {
-        userId: user.userId ?? null,
-      });
-      setShowAuthFlow(false);
     }
 
     if (user && !session) {

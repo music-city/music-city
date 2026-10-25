@@ -111,11 +111,29 @@ test("PostgreSQL finalization transaction lifecycle (network boundary mocked)", 
       const history = await royaltiesService.listTrackSplits(v.proposal.trackId);
       assert.equal(history.items.find(split => split.id === historicalId)?.historical,true);
       assert.equal(history.items.find(split => split.id === historicalId)?.status,"active");
-      const entries = await royaltiesService.ensureTrackPurchaseLedgerEntries(payment);
+      const capturedPayment = { ...payment, royaltySplitId: effective!.id };
+      const entries = await royaltiesService.ensureTrackPurchaseLedgerEntries(capturedPayment);
       assert.equal(entries.length,2);
       assert.ok(entries.every(entry => entry.splitId === effective!.id));
       assert.equal(entries.find(entry => entry.recipientWalletAddress === owner.publicKey())?.grossAmount,"70.0000000");
       assert.equal(entries.find(entry => entry.recipientWalletAddress === contributor.publicKey())?.grossAmount,"30.0000000");
+      // Descriptive track credits must not mutate finalized consent or financial allocations.
+      await db.transaction(client => client.query("UPDATE tracks SET status='published', visibility='published', payload=payload || $2::jsonb WHERE id=$1", [v.proposal.trackId, JSON.stringify({ id: v.proposal.trackId, artistId: ownerId, title: "Published track", artistName: "Owner", genre: "Pop", runtime: "1:00", status: "published", visibility: "published", priceLabel: "Published", plays: 0, likes: 0, playbackReady: true })]));
+      const { tracksService } = await import("../tracks/tracks.service.js");
+      const { usersService } = await import("../users/users.service.js");
+      const access = usersService.requireArtistOnboardingAccess;
+      usersService.requireArtistOnboardingAccess = async () => ({ id: ownerId }) as never;
+      try {
+        await tracksService.updateTrackMetadata(owner.publicKey(), v.proposal.trackId, { credits: [{ role: "composer", name: "Updated Composer" }], recordLabel: "Updated Label", isrc: "USRC17607839" });
+      } finally { usersService.requireArtistOnboardingAccess = access; }
+      const afterMetadata=await agreements.get(id,owner.publicKey());
+      const {context:oldDisplay,...beforeFinancial}=detail;
+      const {context:newDisplay,...afterFinancial}=afterMetadata;
+      assert.deepEqual(afterFinancial,beforeFinancial);
+      assert.equal(newDisplay.track.title,'Published track');
+      assert.deepEqual(await finalizedSplitsRepository.effective(v.proposal.trackId), effective);
+      const ledgerSnapshot = (items: typeof entries) => items.map(item => JSON.parse(JSON.stringify(item))).sort((a, b) => a.id.localeCompare(b.id));
+      assert.deepEqual(ledgerSnapshot(await royaltiesService.ensureTrackPurchaseLedgerEntries(capturedPayment)), ledgerSnapshot(entries));
       await assert.rejects(db.transaction(client => client.query("UPDATE agreement_finalizations SET payload=jsonb_set(payload,'{ledger}','999') WHERE id=$1",[attempt.id])));
       await assert.rejects(db.transaction(client => client.query("DELETE FROM agreement_finalizations WHERE id=$1",[attempt.id])));
       await assert.rejects(db.transaction(client => client.query("UPDATE contributor_agreements SET effective_version=NULL WHERE id=$1",[id])));
@@ -142,7 +160,7 @@ test("PostgreSQL finalization transaction lifecycle (network boundary mocked)", 
       assert.equal(amended.versions[0]!.state,"finalized");
       assert.equal(amended.versions[1]!.state,"finalized");
       assert.equal((await finalizedSplitsRepository.effective(v.proposal.trackId))?.version,2);
-      const preservedEntries = await royaltiesService.ensureTrackPurchaseLedgerEntries(payment);
+      const preservedEntries = await royaltiesService.ensureTrackPurchaseLedgerEntries(capturedPayment);
       assert.ok(preservedEntries.every(entry => entry.splitId === effective!.id));
       resetNetwork();
     });
@@ -194,6 +212,21 @@ test("PostgreSQL finalization transaction lifecycle (network boundary mocked)", 
         assert.equal(result.status,"fulfilled");
         if (result.status === "fulfilled") await fail(result.value as AgreementFinalization);
       }
+    });
+    await t.test("concurrent submission and bounded retries persist the same exact attempt before sending",async()=>{
+      resetNetwork(); const v=await ready(),attempt=await twoSignatures(v),id=v.proposal.agreementId;
+      const sent:string[]=[];
+      chain.send=async tx=>{sent.push(tx.hash().toString('hex'));throw new Error('Unknown outcome');};
+      await Promise.all([finalizations.submit(id,attempt.id,admin),finalizations.submit(id,attempt.id,admin)]);
+      assert.deepEqual(sent,[attempt.transactionHash]);
+      for(let i=0;i<7;i++){
+        await db.transaction(client=>client.query("UPDATE agreement_finalizations SET last_submitted_at=NOW()-INTERVAL '20 seconds' WHERE id=$1",[attempt.id]));
+        await finalizations.submit(id,attempt.id,admin);
+      }
+      assert.equal(sent.length,5);assert.ok(sent.every(hash=>hash===attempt.transactionHash));
+      const row=(await db.transaction(client=>client.query('SELECT submission_count,status FROM agreement_finalizations WHERE id=$1',[attempt.id]))).rows[0];
+      assert.equal(row.submission_count,5);assert.equal(row.status,'submitted');
+      await fail(attempt);resetNetwork();
     });
     await t.test("admin resolution preserves the disputed proposal and leaves new submission under owner control", async () => {
       resetNetwork(); const v = await ready(), id = v.proposal.agreementId;

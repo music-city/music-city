@@ -25,6 +25,8 @@ pnpm --filter @music-city/shared build
 
 declare -A services=(
   [server]='pnpm dev:server'
+  [worker]='pnpm dev:worker'
+  [financial-worker]='pnpm dev:financial-worker'
   [client]='pnpm dev:client'
   [admin]='pnpm dev:admin'
 )
@@ -55,7 +57,7 @@ add_service() {
 
   if [[ -z "${services[$name]:-}" ]]; then
     echo "Unknown service: $name" >&2
-    echo "Available services: admin client server" >&2
+    echo "Available services: admin client server worker financial-worker" >&2
     exit 1
   fi
 
@@ -81,7 +83,7 @@ USAGE
 }
 
 if [[ $# -eq 0 ]]; then
-  for service in server client admin; do
+  for service in server worker financial-worker client admin; do
     add_service "$service"
   done
 elif [[ "$1" == '-h' || "$1" == '--help' ]]; then

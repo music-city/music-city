@@ -1,3 +1,4 @@
+import { agreementContext } from "./agreement-views.js";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { PoolClient } from "pg";
@@ -35,9 +36,10 @@ async function verifyConsent(client: PoolClient, version: AgreementVersion) {
   if (verified.state !== "ready") throw new HttpError(409,"Every required contributor must accept this exact undisputed proposal before finalization");
 }
 export const finalizationService = {
-  async resolveDispute(id: string,actor: string,input: unknown) {
+  async resolveDispute(id: string,actor: string,input: unknown,expectedVersion?:number,expectedHash?:string) {
     const request = z.object({ resolution: z.string().trim().min(1).max(1000) }).strict().parse(input);
     return agreementsRepository.locked(id,actor,async (client,_root,current) => {
+      if((expectedVersion!==undefined&&expectedVersion!==current.proposal.version)||(expectedHash!==undefined&&expectedHash!==current.proposalHash)) throw new HttpError(409,"The agreement changed. Review the latest version");
       if (!["disputed","rejected"].includes(current.state)) throw new HttpError(409,"Only disputed or rejected versions can be resolved");
       // Resolution creates an owner-controlled draft. It does not alter the blocked
       // version or authorize any acceptance, submission or effective-version change.
@@ -52,26 +54,27 @@ export const finalizationService = {
   async list() {
     return databaseService.transaction(async client => {
       const rows = await client.query("SELECT a.id,a.effective_version,v.payload FROM contributor_agreements a JOIN agreement_versions v ON v.agreement_id=a.id AND v.version=a.current_version ORDER BY a.created_at DESC");
-      return rows.rows.map(row => ({ id: row.id,effectiveVersion: row.effective_version,current: row.payload }));
+      return Promise.all(rows.rows.map(async row => ({ id: row.id,effectiveVersion: row.effective_version,current: row.payload,context:await agreementContext(client,[row.payload]) })));
     });
   },
   async detail(id: string, actor: string) {
     return agreementsRepository.locked(id,actor,async (client,root) => {
       const versions = await client.query("SELECT payload FROM agreement_versions WHERE agreement_id=$1 ORDER BY version",[id]);
-      const attempts = await client.query("SELECT payload FROM agreement_finalizations WHERE agreement_id=$1 ORDER BY version,id",[id]);
+      const attempts = await client.query("SELECT payload FROM agreement_finalizations WHERE agreement_id=$1 ORDER BY version,payload->>'createdAt',id",[id]);
       const events = await client.query("SELECT id,version,actor_wallet,action,payload,created_at FROM agreement_events WHERE agreement_id=$1 ORDER BY id",[id]);
-      return { id,currentVersion: root.current_version,effectiveVersion: root.effective_version,versions: versions.rows.map(r => r.payload),finalizations: attempts.rows.map(r => agreementFinalizationSchema.parse(r.payload)),events: events.rows };
+      return { id,currentVersion: root.current_version,effectiveVersion: root.effective_version,versions: versions.rows.map(r => r.payload),finalizations: attempts.rows.map(r => agreementFinalizationSchema.parse(r.payload)),events: events.rows,context:await agreementContext(client,versions.rows.map(r=>r.payload)) };
     },true);
   },
-  async prepare(id: string,actor: string) {
+  async prepare(id: string,actor: string,expectedVersion?:number,expectedHash?:string) {
     return agreementsRepository.locked(id,actor,async (client,root,current) => {
+      if((expectedVersion!==undefined&&expectedVersion!==current.proposal.version)||(expectedHash!==undefined&&expectedHash!==current.proposalHash)) throw new HttpError(409,"The agreement changed. Review the latest version");
       await client.query("SELECT pg_advisory_xact_lock(hashtext('music-city-agreement-treasury'))");
       const existing = await client.query("SELECT payload FROM agreement_finalizations WHERE agreement_id=$1 AND version=$2 AND status IN ('awaiting_signatures','submitting','submitted','confirmed')",[id,current.proposal.version]);
       if (existing.rows[0]) return agreementFinalizationSchema.parse(existing.rows[0].payload);
       if (current.state !== "ready") throw new HttpError(409,"Only a fully accepted, undisputed version can start finalization");
       await verifyConsent(client,current);
       const config = agreementsChain.config();
-      const outstanding = await client.query("SELECT id FROM agreement_finalizations WHERE treasury_address=$1 AND status IN ('awaiting_signatures','submitting','submitted')",[config.treasuryAddress]);
+      const outstanding = await client.query("SELECT id FROM agreement_finalizations WHERE treasury_address=$1 AND status IN ('awaiting_signatures','submitting','submitted') UNION ALL SELECT id FROM financial_attempts WHERE source_address=$1 AND status IN ('awaiting_signatures','submitting','submitted')",[config.treasuryAddress]);
       if (outstanding.rowCount) throw new HttpError(409,"Reconcile the treasury's outstanding finalization before preparing another transaction");
       const previous = root.effective_version ? await readVersion(client,id,root.effective_version) : null;
       const latest = await agreementsChain.getLatest(current.proposal.trackId);
@@ -103,10 +106,10 @@ export const finalizationService = {
   },
   async submit(id: string,attemptId: string,actor: string) {
     // Commit intent and exact hash before the network call. Network failure leaves a reconcilable attempt.
-    const attempt = await agreementsRepository.locked(id,actor,async (client,_root,current) => {
+    const prepared = await agreementsRepository.locked(id,actor,async (client,_root,current) => {
       const stored = await loadAttempt(client,attemptId);
       if (stored.agreementId !== id || stored.version !== current.proposal.version) throw new HttpError(409,"Attempt does not match this agreement");
-      if (stored.status === "confirmed") return stored;
+      if (stored.status === "confirmed") return {attempt:stored,send:false};
       if (!["awaiting_signatures","submitting","submitted"].includes(stored.status)) throw new HttpError(409,"Prepare a new attempt after this terminal result");
       requireConfigMatches(stored);
       await verifyConsent(client,current);
@@ -114,12 +117,16 @@ export const finalizationService = {
       const evidence = await agreementsChain.treasuryEvidence();
       if (JSON.stringify(evidence.signers) !== JSON.stringify(stored.signers)) throw new HttpError(409,"Treasury signer configuration changed; reconcile and prepare a new attempt");
       if (new Date(stored.expiresAt).getTime() <= Date.now()) throw new HttpError(409,"Reconcile this expired transaction before retrying");
+      const recovery=(await client.query<{submission_count:number;last_submitted_at:Date|null}>("SELECT submission_count,last_submitted_at FROM agreement_finalizations WHERE id=$1",[attemptId])).rows[0]!;
+      if(recovery.submission_count>=5 || (recovery.last_submitted_at && Date.now()-recovery.last_submitted_at.getTime()<15000)) return {attempt:stored,send:false};
+      await client.query("UPDATE agreement_finalizations SET submission_count=submission_count+1,last_submitted_at=NOW() WHERE id=$1",[attemptId]);
       const next = { ...stored,status: "submitting" as const,updatedAt: new Date().toISOString() };
       await saveAttempt(client,next);
       await recordEvent(client,current,actor,"finalization_submission_requested",{ attemptId,transactionHash: next.transactionHash });
-      return next;
+      return {attempt:next,send:true};
     },true);
-    if (attempt.status === "confirmed") return attempt;
+    const attempt=prepared.attempt;
+    if (!prepared.send) return attempt;
     try {
       await agreementsChain.send(signedTreasuryTransaction(attempt));
     } catch (error) {

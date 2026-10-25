@@ -1,7 +1,10 @@
 import { z } from "zod";
 
+export const GUEST_PLAYBACK_SECONDS = 25 * 60;
+
 export const createPlaybackSessionSchema = z.object({
   trackId: z.string().min(1),
+  preloadTicket: z.string().max(4096).optional(),
 });
 export type CreatePlaybackSessionInput = z.infer<
   typeof createPlaybackSessionSchema
@@ -31,4 +34,17 @@ export interface PlaybackSession {
   lastPlaybackEventAt?: string;
   qualifiedStreamCountedAt?: string;
   completedAt?: string;
+  guestIdHash?: string;
+  isGuest?: boolean;
+  guestLimitSeconds?: number;
+  guestRemainingSeconds?: number;
+  guestBudgetRemainingSeconds?: number;
+  guestTrackDurationSeconds?: number;
+}
+
+export interface PlaybackPreload {
+  ticket: string;
+  iv: string;
+  ciphertext: string;
+  expiresAt: string;
 }

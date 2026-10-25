@@ -1,5 +1,7 @@
 "use client";
 
+import Image from "next/image";
+
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import type {
@@ -176,8 +178,9 @@ export const AccountOverview = () => {
         {profile?.headerImageUrl ? (
           <div className="h-40 overflow-hidden rounded-t-xl border-b border-white/10">
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
+            <Image
               src={profile.headerImageUrl}
+              sizes="(min-width: 1024px) 640px, 92vw"
               alt=""
               className="h-full w-full object-cover"
             />
@@ -187,8 +190,9 @@ export const AccountOverview = () => {
           <div className="flex items-center gap-4">
             {profile?.profileImageUrl ? (
               // eslint-disable-next-line @next/next/no-img-element
-              <img
+              <Image
                 src={profile.profileImageUrl}
+                sizes="64px" maxWidth={192}
                 alt=""
                 className="size-16 rounded-full object-cover ring-2 ring-emerald-300/40"
               />
@@ -329,6 +333,7 @@ export const AccountOverview = () => {
 
       <div className="space-y-6">
         <WalletOverviewCard />
+        <Button asChild variant="outline"><Link href="/account/support">Support history</Link></Button>
 
         <Card className="border-white/10 bg-white/5 text-white shadow-none">
           <CardHeader>
@@ -346,6 +351,9 @@ export const AccountOverview = () => {
           <CardContent className="grid gap-4 sm:grid-cols-2">
             <Button asChild variant="outline" className="border-white/10 bg-white/5 text-white">
               <Link href="/account/agreements">Royalty agreements</Link>
+            </Button>
+            <Button asChild variant="outline" className="border-white/10 bg-white/5 text-white">
+              <Link href="/dashboard/revenue">Your earnings</Link>
             </Button>
             <div className="rounded-2xl border border-white/10 bg-slate-950/70 p-4">
               <p className="text-xs uppercase tracking-[0.2em] text-slate-500">

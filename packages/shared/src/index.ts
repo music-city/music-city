@@ -6,6 +6,7 @@ export * from "./admin.js";
 export * from "./auth.js";
 export * from "./archive.js";
 export * from "./commerce.js";
+export * from "./cashout.js";
 export * from "./entitlements.js";
 export * from "./music.js";
 export * from "./payments.js";
@@ -16,3 +17,7 @@ export * from "./user.js";
 export * from "./wallet.js";
 
 export * from "./referrals.js";
+export * from "./settlements.js";
+export * from "./support.js";
+
+export * from "./agreement-views.js";

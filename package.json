@@ -14,9 +14,18 @@
     "test": "pnpm --filter server --filter client --filter admin test",
     "test:referrals": "bash scripts/verify-referrals.sh",
     "test:early-user-discount": "bash scripts/verify-referrals.sh",
-    "test:e2e:early-user-discount": "bash scripts/verify-early-user-discount-browser.sh"
+    "test:e2e:early-user-discount": "bash scripts/verify-early-user-discount-browser.sh",
+    "test:track-credits": "bash scripts/verify-track-credits.sh",
+    "test:e2e:track-credits": "bash scripts/verify-track-credits.sh --browser",
+    "test:e2e:studio-ui": "bash scripts/verify-track-credits.sh --studio",
+    "test:e2e:release-flow": "bash scripts/verify-track-credits.sh --release",
+    "test:e2e:studio-audit": "bash scripts/verify-track-credits.sh --audit",
+    "dev:worker": "pnpm --filter server dev:worker",
+    "dev:financial-worker": "pnpm --filter server dev:financial-worker",
+    "settlements:demo:testnet": "bash scripts/settlement-testnet-demo.sh"
   },
   "devDependencies": {
-    "playwright": "1.64.0"
+    "playwright": "1.64.0",
+    "railway": "^3.16.0"
   }
 }

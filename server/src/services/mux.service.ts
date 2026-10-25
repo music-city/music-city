@@ -52,6 +52,24 @@ export const muxService = {
     return upload;
   },
 
+  async createAssetFromUrl(sourceUrl: string, trackId: string) {
+    return requireClient().video.assets.create({
+      inputs: [{ url: sourceUrl }],
+      passthrough: trackId,
+      normalize_audio: true,
+      playback_policies: [this.usesSignedPlayback() ? "signed" : "public"],
+    });
+  },
+
+  async findAssetByPassthrough(passthrough: string) {
+    let inspected=0;
+    for await (const asset of requireClient().video.assets.list({limit:100})) {
+      if(asset.passthrough===passthrough)return asset;
+      if(++inspected>=1000)break;
+    }
+    return null;
+  },
+
   async getUpload(uploadId: string) {
     return requireClient().video.uploads.retrieve(uploadId);
   },
@@ -79,7 +97,7 @@ export const muxService = {
 
     const token = await requireClient().jwt.signPlaybackId(playbackId, {
       type: "video",
-      expiration: "15m",
+      expiration: "24h",
     });
 
     return `https://stream.mux.com/${playbackId}.m3u8?token=${encodeURIComponent(token)}`;

@@ -1,5 +1,7 @@
 import type {
   ReleaseCreateInput,
+  ReleaseTrackMetadataInput,
+  TrackSummary,
   ReleaseDetail,
   ReleaseSummary,
   ReleaseTrackAssignInput,
@@ -10,8 +12,51 @@ import type {
 import { httpClient } from "@/lib/api/http-client";
 
 export const releasesApi = {
+  async beginRevision(token: string, releaseId: string) {
+    const response = await httpClient.post<{ release: ReleaseDetail }>(
+      `/releases/${releaseId}/revision`,
+      {},
+      token,
+    );
+    return response.release;
+  },
+  async applyTrackMetadata(
+    token: string,
+    releaseId: string,
+    input: ReleaseTrackMetadataInput,
+  ) {
+    const response = await httpClient.post<{ tracks: TrackSummary[] }>(
+      `/releases/${releaseId}/track-metadata`,
+      input,
+      token,
+    );
+    return response.tracks;
+  },
+
+  async publish(
+    token: string,
+    releaseId: string,
+    mode: "published" | "scheduled",
+    releaseAt?: string,
+  ) {
+    const response = await httpClient.post<{ release: ReleaseDetail }>(
+      `/releases/${releaseId}/publication`,
+      { mode, releaseAt },
+      token,
+    );
+    return response.release;
+  },
+  async cancelPublication(token: string, releaseId: string) {
+    const response = await httpClient.delete<{ release: ReleaseDetail }>(
+      `/releases/${releaseId}/publication`,
+      token,
+    );
+    return response.release;
+  },
   async listReleases() {
-    const response = await httpClient.get<{ items: ReleaseSummary[] }>("/releases");
+    const response = await httpClient.get<{ items: ReleaseSummary[] }>(
+      "/releases",
+    );
     return response.items;
   },
 
@@ -47,7 +92,11 @@ export const releasesApi = {
     return response.release;
   },
 
-  async updateRelease(token: string, releaseId: string, input: ReleaseUpdateInput) {
+  async updateRelease(
+    token: string,
+    releaseId: string,
+    input: ReleaseUpdateInput,
+  ) {
     const response = await httpClient.put<{ release: ReleaseDetail }>(
       `/releases/${releaseId}`,
       input,
@@ -82,7 +131,11 @@ export const releasesApi = {
     return response.release;
   },
 
-  async removeTrackFromRelease(token: string, releaseId: string, trackId: string) {
+  async removeTrackFromRelease(
+    token: string,
+    releaseId: string,
+    trackId: string,
+  ) {
     const response = await httpClient.delete(
       `/releases/${releaseId}/tracks/${trackId}`,
       token,
